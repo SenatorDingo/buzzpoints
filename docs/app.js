@@ -973,7 +973,7 @@ function buildModel(megaJson) {
           if (gameStats) gameStats.negs += 1;
         }
 
-        if (value > 0 && !firstPositive) {
+        if (isGetValue(value) && !firstPositive) {
           firstPositive = {
             teamName,
             playerName,
@@ -1099,6 +1099,51 @@ function buildModel(megaJson) {
             total: totalBonus,
           });
         }
+      }
+    });
+  });
+
+  const playerBySlug = new Map(Array.from(players.values()).map((player) => [player.slug, player]));
+  const teamBySlug = new Map(Array.from(teams.values()).map((team) => [team.slug, team]));
+
+  Array.from(players.values()).forEach((player) => {
+    player.firstBuzzes = 0;
+  });
+
+  Array.from(teams.values()).forEach((team) => {
+    team.firstBuzzes = 0;
+  });
+
+  Array.from(tossups.values()).forEach((tossup) => {
+    tossup.firstBuzzes = 0;
+
+    const getBuzzes = tossup.instances
+      .flatMap((instance) => instance.buzzes)
+      .filter((buzz) => isGetValue(buzz.value))
+      .map((buzz) => ({
+        ...buzz,
+        buzzPosition: Number(buzz.buzzPosition) || 0,
+      }))
+      .filter((buzz) => buzz.buzzPosition > 0);
+
+    if (!getBuzzes.length) {
+      return;
+    }
+
+    const earliestGetPosition = Math.min(...getBuzzes.map((buzz) => buzz.buzzPosition));
+    const earliestGetBuzzes = getBuzzes.filter((buzz) => buzz.buzzPosition === earliestGetPosition);
+
+    earliestGetBuzzes.forEach((buzz) => {
+      tossup.firstBuzzes += 1;
+
+      const player = playerBySlug.get(buzz.playerSlug);
+      if (player) {
+        player.firstBuzzes += 1;
+      }
+
+      const team = teamBySlug.get(buzz.teamSlug);
+      if (team) {
+        team.firstBuzzes += 1;
       }
     });
   });
@@ -1275,12 +1320,20 @@ function getCategoryTossupPlayerRows(categorySlug) {
   const rows = new Map();
 
   state.model.tossups.forEach((tossup) => {
+    const tournamentGetBuzzPositions = tossup.instances
+      .flatMap((instance) => instance.buzzes)
+      .filter((buzz) => isGetValue(buzz.value))
+      .map((buzz) => Number(buzz.buzzPosition) || 0)
+      .filter((position) => position > 0);
+
+    const tournamentFirstGetBuzzPosition = tournamentGetBuzzPositions.length
+      ? Math.min(...tournamentGetBuzzPositions)
+      : 0;
+
     tossup.instances.forEach((instance) => {
       if ((instance.categorySlug || "") !== target) {
         return;
       }
-
-      const firstPositive = instance.buzzes.find((buzz) => buzz.value > 0);
 
       instance.buzzes.forEach((buzz, index) => {
         const key = buzz.playerSlug;
@@ -1330,7 +1383,11 @@ function getCategoryTossupPlayerRows(categorySlug) {
           }
         }
 
-        if (firstPositive && firstPositive.playerSlug === buzz.playerSlug) {
+        if (
+          isGetValue(buzz.value) &&
+          tournamentFirstGetBuzzPosition > 0 &&
+          Number(buzz.buzzPosition) === tournamentFirstGetBuzzPosition
+        ) {
           row.firstBuzzes += 1;
         }
 
@@ -1449,22 +1506,17 @@ function getPlayerBuzzRows(playerSlug) {
       ? Math.min(...tournamentGetBuzzPositions)
       : 0;
 
+    const rankedGetPositions = [...new Set(tournamentGetBuzzPositions)].sort((a, b) => a - b);
+    const rankByPosition = new Map(rankedGetPositions.map((position, index) => [position, index + 1]));
+
     tossup.instances.forEach((instance) => {
-      const positiveBuzzes = [...instance.buzzes]
-        .filter((buzz) => buzz.value > 0)
-        .sort((a, b) => a.buzzPosition - b.buzzPosition);
-
-      const firstPositive = positiveBuzzes[0] || null;
-
       instance.buzzes.forEach((buzz, index) => {
         if (buzz.playerSlug !== playerSlug) {
           return;
         }
 
-        const rank = buzz.value > 0
-          ? positiveBuzzes.findIndex((candidate) =>
-            candidate.playerSlug === buzz.playerSlug && candidate.buzzPosition === buzz.buzzPosition
-          ) + 1
+        const rank = isGetValue(buzz.value)
+          ? rankByPosition.get(Number(buzz.buzzPosition) || 0) || 0
           : 0;
 
         const rebound = buzz.value > 0
@@ -1943,7 +1995,7 @@ function renderTeamListPage(base, parentSlug) {
     <section class="route-block">
       <h2>Teams</h2>
       ${renderTable(
-        ["Team", "Powers", "Gets", "Negs", "Rebounds", "Points", "Earliest Buzz", "Avg. Buzz", "First Buzzes", "Top 3 Buzzes", "Bonuses", "PPB"],
+        ["Team", "Powers", "Gets", "Negs", "Bouncebacks", "Points", "Earliest Buzz", "Avg. Buzz", "First Buzzes", "Top 3 Buzzes", "Bonuses", "PPB"],
         model.teams.map((team) => [
           routeLink(`${base}/${parentSlug}/team/${team.slug}`, team.name),
           escapeHtml(team.powers),
@@ -1969,7 +2021,7 @@ function renderPlayerListPage(base, parentSlug) {
     <section class="route-block">
       <h2>Players</h2>
       ${renderTable(
-        ["Player", "Team", "Powers", "Gets", "Negs", "Rebounds", "Points", "Earliest Buzz", "Avg. Buzz", "First Buzzes", "Top 3 Buzzes"],
+        ["Player", "Team", "Powers", "Gets", "Negs", "Bouncebacks", "Points", "Earliest Buzz", "Avg. Buzz", "First Buzzes", "Top 3 Buzzes"],
         model.players.map((player) => [
           routeLink(getDefaultPlayerBuzzPath(base, parentSlug, player.slug), player.name),
           routeLink(`${base}/${parentSlug}/team/${getTeamSlugByName(player.teamName)}`, player.teamName),
@@ -2062,7 +2114,7 @@ function renderPlayerDetailPage(base, parentSlug, playerSlug) {
     ...(format !== "acf" ? ["Powers"] : []),
     "Gets",
     ...(format !== "pace" ? ["Negs"] : []),
-    "Rebounds",
+    "Bouncebacks",
     "Points",
     "Earliest Buzz",
     "Avg. Buzz",
@@ -2132,7 +2184,7 @@ function renderCategoryTossupDetailPage(base, parentSlug, categorySlug) {
     <section class="route-block">
       <h2 class="detail-title"><b>${escapeHtml(categoryName || "N/A")}</b></h2>
       ${renderTable(
-        ["Player", "Team", "Powers", "Superpowers", "Gets", "Negs", "Rebounds", "Points", "Earliest Buzz", "Avg. Buzz", "First Buzzes", "Top 3 Buzzes"],
+        ["Player", "Team", "Powers", "Superpowers", "Gets", "Negs", "Bouncebacks", "Points", "Earliest Buzz", "Avg. Buzz", "First Buzzes", "Top 3 Buzzes"],
         rows.map((row) => [
           routeLink(getDefaultPlayerBuzzPath(base, parentSlug, row.slug), row.name),
           routeLink(`${base}/${parentSlug}/team/${row.teamSlug}`, row.teamName),
@@ -2246,7 +2298,7 @@ function renderSetPlayerBuzzPage(setSlug, playerSlug) {
       <h2 class="detail-title"><b>${escapeHtml(player.name)}</b><br />${routeLink(`set/${setSlug}/team/${getTeamSlugByName(player.teamName)}`, player.teamName)}</h2>
       <div class="detail-actions">${routeLink(`set/${setSlug}/player/${playerSlug}`, "View Category Stats")}</div>
       ${renderTable(
-        ["Round", "Packet", "#", "Category", "Answer", "Buzzpoint", "Value", "First", "Top 3", "Rank", "Rebound"],
+        ["Round", "Packet", "#", "Category", "Answer", "Buzzpoint", "Value", "First", "Top 3", "Rank", "Bounceback"],
         rows.map((row) => [
           escapeHtml(row.round),
           escapeHtml(row.packetDescriptor || ""),
