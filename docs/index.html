@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Buzzpoints</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <nav id="appNav" class="app-nav" aria-label="Buzzpoints navigation"></nav>
+
+    <section class="load-cta">
+      <button id="toggleLoaderBtn" class="link-btn" type="button">Click here to load a tournament JSON</button>
+    </section>
+
+    <section id="loaderSection" class="upload-block hidden">
+      <h3>Load Mega JSON</h3>
+      <section class="input-group">
+        <label class="file-input">
+          <span>Mega JSON file</span>
+          <input id="megaJsonInput" type="file" accept=".json,application/json" />
+        </label>
+        <label class="checkbox-row">
+          <input id="termsCheckbox" type="checkbox" />
+          <span>I acknowledge the <a href="https://github.com/SenatorDingo/buzzpoints#liability-and-warranty-disclaimer" target="_blank" rel="noopener noreferrer">liability and warranty disclaimer</a> for uploaded tournament files.</span>
+        </label>
+        <div class="button-row">
+          <button id="loadMegaBtn" class="btn-primary">Load Mega JSON</button>
+        </div>
+      </section>
+    </section>
+
+    <section id="viewer" class="results hidden">
+      <div id="breadcrumbs" class="breadcrumbs hidden"></div>
+      <section id="routeContent"></section>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
