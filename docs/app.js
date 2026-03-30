@@ -71,6 +71,103 @@ function stripTags(value) {
     .trim();
 }
 
+function sanitizeRichHtml(value) {
+  const allowedTags = new Set([
+    "b",
+    "strong",
+    "i",
+    "em",
+    "u",
+    "sub",
+    "sup",
+    "small",
+    "br",
+    "p",
+    "ul",
+    "ol",
+    "li",
+    "span",
+  ]);
+
+  const wrapper = document.createElement("div");
+  wrapper.innerHTML = String(value || "");
+
+  const allNodes = wrapper.querySelectorAll("*");
+  allNodes.forEach((node) => {
+    const tagName = node.tagName.toLowerCase();
+
+    if (!allowedTags.has(tagName)) {
+      node.replaceWith(document.createTextNode(node.textContent || ""));
+      return;
+    }
+
+    Array.from(node.attributes).forEach((attribute) => node.removeAttribute(attribute.name));
+  });
+
+  return wrapper.innerHTML;
+}
+
+function renderQuestionWithWordSpans(questionText) {
+  const wrapper = document.createElement("div");
+  wrapper.innerHTML = sanitizeRichHtml(questionText || "");
+
+  const textNodes = [];
+  const walker = document.createTreeWalker(wrapper, NodeFilter.SHOW_TEXT);
+
+  while (walker.nextNode()) {
+    textNodes.push(walker.currentNode);
+  }
+
+  let wordIndex = 0;
+
+  const shouldCountAsWordToken = (segment) => {
+    const withoutPowerMarker = String(segment || "").replaceAll("*", "");
+    return /[\p{L}\p{N}]/u.test(withoutPowerMarker);
+  };
+
+  textNodes.forEach((textNode) => {
+    const text = textNode.textContent || "";
+    if (!text.trim()) {
+      return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    const parts = text.split(/(\s+)/);
+
+    parts.forEach((part) => {
+      if (!part) {
+        return;
+      }
+
+      if (/^\s+$/.test(part)) {
+        fragment.appendChild(document.createTextNode(part));
+        return;
+      }
+
+      if (!shouldCountAsWordToken(part)) {
+        // Keep punctuation in-place visually, but do not advance buzz word indexing.
+        fragment.appendChild(document.createTextNode(part));
+        return;
+      }
+
+      wordIndex += 1;
+      const span = document.createElement("span");
+      span.className = "question-word";
+      span.setAttribute("data-word-index", String(wordIndex));
+      span.textContent = part;
+      fragment.appendChild(span);
+    });
+
+    textNode.replaceWith(fragment);
+  });
+
+  if (!wordIndex) {
+    return `<p class="tossup-question-text">(question unavailable)</p>`;
+  }
+
+  return `<div id="tossupQuestionWords" class="rich-text tossup-question-text">${wrapper.innerHTML}</div>`;
+}
+
 function shortenAnswerline(answerline) {
   if (!answerline) return "";
   return String(answerline)
@@ -89,6 +186,11 @@ function formatDecimal(value) {
 function formatPercent(value) {
   if (!Number.isFinite(value)) return "0.0%";
   return `${value.toFixed(1)}%`;
+}
+
+function isGetValue(value) {
+  const numeric = Number(value);
+  return numeric === 10 || numeric === 15 || numeric === 20;
 }
 
 function routeLink(path, label) {
@@ -1337,6 +1439,16 @@ function getPlayerBuzzRows(playerSlug) {
   const rows = [];
 
   state.model.tossups.forEach((tossup) => {
+    const tournamentGetBuzzPositions = tossup.instances
+      .flatMap((instance) => instance.buzzes)
+      .filter((buzz) => isGetValue(buzz.value))
+      .map((buzz) => Number(buzz.buzzPosition) || 0)
+      .filter((position) => position > 0);
+
+    const tournamentFirstGetBuzzPosition = tournamentGetBuzzPositions.length
+      ? Math.min(...tournamentGetBuzzPositions)
+      : 0;
+
     tossup.instances.forEach((instance) => {
       const positiveBuzzes = [...instance.buzzes]
         .filter((buzz) => buzz.value > 0)
@@ -1371,7 +1483,12 @@ function getPlayerBuzzRows(playerSlug) {
           questionSlug: instance.tossupSlug,
           buzzPosition: buzz.buzzPosition,
           value: buzz.value,
-          firstBuzz: firstPositive && firstPositive.playerSlug === buzz.playerSlug ? 1 : 0,
+          firstBuzz:
+            isGetValue(buzz.value) &&
+            tournamentFirstGetBuzzPosition > 0 &&
+            Number(buzz.buzzPosition) === tournamentFirstGetBuzzPosition
+              ? 1
+              : 0,
           topThreeBuzz: buzz.value > 0 && buzz.buzzPosition > 0 && buzz.buzzPosition <= 3 ? 1 : 0,
           buzzRank: rank,
           rebound: rebound ? 1 : 0,
@@ -1381,6 +1498,103 @@ function getPlayerBuzzRows(playerSlug) {
   });
 
   return rows.sort((a, b) => a.round - b.round || a.questionNumber - b.questionNumber);
+}
+
+function getPlayerCategoryRows(playerSlug) {
+  const rows = new Map();
+  let totalPoints = 0;
+
+  state.model.tossups.forEach((tossup) => {
+    const tournamentGetBuzzPositions = tossup.instances
+      .flatMap((instance) => instance.buzzes)
+      .filter((buzz) => isGetValue(buzz.value))
+      .map((buzz) => Number(buzz.buzzPosition) || 0)
+      .filter((position) => position > 0);
+
+    const tournamentFirstGetBuzzPosition = tournamentGetBuzzPositions.length
+      ? Math.min(...tournamentGetBuzzPositions)
+      : 0;
+
+    tossup.instances.forEach((instance) => {
+      instance.buzzes.forEach((buzz, index) => {
+        if (buzz.playerSlug !== playerSlug) {
+          return;
+        }
+
+        const key = instance.categoryMain || "Unknown";
+        if (!rows.has(key)) {
+          rows.set(key, {
+            category: key,
+            superpowers: 0,
+            powers: 0,
+            gets: 0,
+            negs: 0,
+            rebounds: 0,
+            points: 0,
+            earliestBuzz: null,
+            positiveBuzzCount: 0,
+            positiveBuzzTotal: 0,
+            firstBuzzes: 0,
+            topThreeBuzzes: 0,
+          });
+        }
+
+        const row = rows.get(key);
+        row.points += buzz.value;
+        totalPoints += buzz.value;
+
+        if (buzz.value >= 20) {
+          row.superpowers += 1;
+          row.gets += 1;
+        } else if (buzz.value >= 15) {
+          row.powers += 1;
+          row.gets += 1;
+        } else if (buzz.value > 0) {
+          row.gets += 1;
+        } else if (buzz.value < 0) {
+          row.negs += 1;
+        }
+
+        if (buzz.value > 0) {
+          row.positiveBuzzCount += 1;
+          row.positiveBuzzTotal += buzz.buzzPosition;
+
+          if (buzz.buzzPosition > 0 && (!row.earliestBuzz || buzz.buzzPosition < row.earliestBuzz)) {
+            row.earliestBuzz = buzz.buzzPosition;
+          }
+
+          if (buzz.buzzPosition > 0 && buzz.buzzPosition <= 3) {
+            row.topThreeBuzzes += 1;
+          }
+
+          const hadOpponentNegBefore = instance.buzzes
+            .slice(0, index)
+            .some((prior) => prior.value < 0 && prior.teamSlug !== buzz.teamSlug);
+
+          if (hadOpponentNegBefore) {
+            row.rebounds += 1;
+          }
+        }
+
+        if (
+          isGetValue(buzz.value) &&
+          tournamentFirstGetBuzzPosition > 0 &&
+          Number(buzz.buzzPosition) === tournamentFirstGetBuzzPosition
+        ) {
+          row.firstBuzzes += 1;
+        }
+      });
+    });
+  });
+
+  return Array.from(rows.values())
+    .map((row) => ({
+      ...row,
+      earliestBuzz: row.earliestBuzz || "",
+      averageBuzz: row.positiveBuzzCount ? row.positiveBuzzTotal / row.positiveBuzzCount : 0,
+      percentPoints: totalPoints ? (row.points / totalPoints) * 100 : 0,
+    }))
+    .sort((a, b) => b.points - a.points);
 }
 
 function getTeamBySlug(slug) {
@@ -1431,27 +1645,6 @@ function getTournamentBonus(round, questionNumber) {
   return state.model.bonuses.find((bonus) =>
     bonus.instances.some((instance) => Number(instance.round) === Number(round) && Number(instance.questionNumber) === Number(questionNumber))
   );
-}
-
-function renderQuestionWordsMarkup(questionText) {
-  const words = stripTags(questionText || "")
-    .split(/\s+/)
-    .filter(Boolean);
-
-  if (!words.length) {
-    return `<p class="tossup-question-text">(question unavailable)</p>`;
-  }
-
-  return `
-    <p id="tossupQuestionWords" class="tossup-question-text">
-      ${words
-        .map(
-          (word, index) =>
-            `<span class="question-word" data-word-index="${index + 1}">${escapeHtml(word)}</span>`
-        )
-        .join(" ")}
-    </p>
-  `;
 }
 
 function renderTossupBuzzTable(allBuzzes, basePath) {
@@ -1505,31 +1698,64 @@ function clearTossupWordHighlight() {
     });
 }
 
+function applyTossupWordHighlightFromRow(row) {
+  clearTossupWordHighlight();
+
+  const buzzPosition = Number(row.getAttribute("data-buzz-position") || 0);
+  if (!Number.isFinite(buzzPosition) || buzzPosition <= 0) {
+    return;
+  }
+
+  const word = dom.routeContent.querySelector(`.question-word[data-word-index="${buzzPosition}"]`);
+  if (!word) {
+    return;
+  }
+
+  const buzzValue = Number(row.getAttribute("data-buzz-value") || 0);
+  word.classList.add(buzzValue < 0 ? "highlight-neg" : "highlight-pos");
+}
+
 function wireTossupBuzzHoverInteractions() {
   const rows = dom.routeContent.querySelectorAll(".buzz-hover-row");
   if (!rows.length) {
     return;
   }
 
+  let pinnedRow = null;
+
   rows.forEach((row) => {
     row.addEventListener("mouseenter", () => {
-      clearTossupWordHighlight();
-
-      const buzzPosition = Number(row.getAttribute("data-buzz-position") || 0);
-      if (!Number.isFinite(buzzPosition) || buzzPosition <= 0) {
+      if (pinnedRow) {
         return;
       }
 
-      const word = dom.routeContent.querySelector(`.question-word[data-word-index="${buzzPosition}"]`);
-      if (!word) {
-        return;
-      }
-
-      const buzzValue = Number(row.getAttribute("data-buzz-value") || 0);
-      word.classList.add(buzzValue < 0 ? "highlight-neg" : "highlight-pos");
+      applyTossupWordHighlightFromRow(row);
     });
 
-    row.addEventListener("mouseleave", clearTossupWordHighlight);
+    row.addEventListener("mouseleave", () => {
+      if (pinnedRow) {
+        return;
+      }
+
+      clearTossupWordHighlight();
+    });
+
+    row.addEventListener("click", () => {
+      if (pinnedRow === row) {
+        row.classList.remove("pinned");
+        pinnedRow = null;
+        clearTossupWordHighlight();
+        return;
+      }
+
+      if (pinnedRow) {
+        pinnedRow.classList.remove("pinned");
+      }
+
+      pinnedRow = row;
+      row.classList.add("pinned");
+      applyTossupWordHighlightFromRow(row);
+    });
   });
 }
 
@@ -1679,7 +1905,10 @@ function renderTournamentDetailPage(tournamentSlug) {
         model.tossups.map((tossup) => [
           escapeHtml(tossup.packetDescriptor || tossup.packetName),
           escapeHtml(tossup.questionNumber),
-          escapeHtml(tossup.answerPrimary || "(answer unavailable)"),
+          routeLink(
+            `tournament/${tournamentSlug}/tossup/${tossup.round}/${tossup.questionNumber}`,
+            tossup.answerPrimary || "(answer unavailable)"
+          ),
           escapeHtml(tossup.categoryMain),
           escapeHtml(tossup.heard),
           escapeHtml(formatPercent(tossup.conversionRate)),
@@ -1821,10 +2050,26 @@ function renderPlayerDetailPage(base, parentSlug, playerSlug) {
   const player = getPlayerBySlug(playerSlug);
   if (!player) return `<div class="empty-state">Player not found.</div>`;
 
-  const buzzRows = [...player.buzzes].sort((a, b) => a.round - b.round || a.questionNumber - b.questionNumber);
+  const categoryRows = getPlayerCategoryRows(playerSlug);
+  const format = state.model.questionSet.format;
   const buzzPath = base === "set"
     ? `set/${parentSlug}/player/${player.slug}/buzz`
     : `set/${state.model.questionSet.slug}/player/${player.slug}/buzz`;
+
+  const columns = [
+    "Category",
+    ...(format === "superpowers" ? ["Superpowers"] : []),
+    ...(format !== "acf" ? ["Powers"] : []),
+    "Gets",
+    ...(format !== "pace" ? ["Negs"] : []),
+    "Rebounds",
+    "Points",
+    "Earliest Buzz",
+    "Avg. Buzz",
+    "First Buzzes",
+    "Top 3 Buzzes",
+    "% of Points",
+  ];
 
   return `
     <section class="route-block">
@@ -1833,16 +2078,22 @@ function renderPlayerDetailPage(base, parentSlug, playerSlug) {
     </section>
 
     <section class="route-block">
-      <h2>Buzz Log</h2>
+      <h2>Category Stats</h2>
       ${renderTable(
-        ["Round", "Packet", "Q", "Opponent", "Buzz Position", "Value"],
-        buzzRows.map((buzz) => [
-          escapeHtml(buzz.round),
-          escapeHtml(buzz.packetDescriptor || buzz.packetName),
-          escapeHtml(buzz.questionNumber),
-          routeLink(`${base}/${parentSlug}/team/${buzz.opponentSlug}`, buzz.opponentName),
-          escapeHtml(buzz.buzzPosition),
-          escapeHtml(buzz.value),
+        columns,
+        categoryRows.map((row) => [
+          escapeHtml(row.category),
+          ...(format === "superpowers" ? [escapeHtml(row.superpowers)] : []),
+          ...(format !== "acf" ? [escapeHtml(row.powers)] : []),
+          escapeHtml(row.gets),
+          ...(format !== "pace" ? [escapeHtml(row.negs)] : []),
+          escapeHtml(row.rebounds),
+          escapeHtml(row.points),
+          escapeHtml(row.earliestBuzz || ""),
+          escapeHtml(formatDecimal(row.averageBuzz)),
+          escapeHtml(row.firstBuzzes),
+          escapeHtml(row.topThreeBuzzes),
+          escapeHtml(formatDecimal(row.percentPoints)),
         ])
       )}
     </section>
@@ -2065,7 +2316,13 @@ function renderTournamentTossupListPage(tournamentSlug) {
 
 function renderTossupDetailContent(tossup, basePath, backPath) {
   const allBuzzes = tossup.instances.flatMap((instance) =>
-    instance.buzzes.map((buzz) => ({ ...buzz, round: instance.round, packetDescriptor: instance.packetDescriptor, questionNumber: instance.questionNumber }))
+    instance.buzzes.map((buzz) => ({
+      ...buzz,
+      round: instance.round,
+      packetDescriptor: instance.packetDescriptor,
+      questionNumber: instance.questionNumber,
+      buzzPosition: Number(buzz.buzzPosition) || 0,
+    }))
   );
 
   return `
@@ -2082,8 +2339,9 @@ function renderTossupDetailContent(tossup, basePath, backPath) {
       ])}
       <p><b>Category:</b> ${escapeHtml(tossup.categoryMain)}</p>
       <p><b>Question:</b></p>
-      ${renderQuestionWordsMarkup(tossup.question || "")}
-      <p><b>Answer:</b> ${escapeHtml(stripTags(tossup.answer || tossup.answerPrimary || ""))}</p>
+      ${renderQuestionWithWordSpans(tossup.question || "")}
+      <p><b>Answer:</b></p>
+      <div class="rich-text">${sanitizeRichHtml(tossup.answer || tossup.answerPrimary || "")}</div>
     </section>
 
     <section class="route-block">
@@ -2172,10 +2430,20 @@ function renderBonusDetailContent(bonus, basePath, backPath) {
         { label: "Hard %", value: formatPercent(bonus.hardConversion) },
       ])}
       <p><b>Category:</b> ${escapeHtml(bonus.categoryMain)}</p>
-      <p><b>Leadin:</b> ${escapeHtml(stripTags(bonus.leadin || ""))}</p>
-      <p><b>Part 1:</b> ${escapeHtml(stripTags(easyPart))} | <b>Answer:</b> ${escapeHtml(stripTags(easyAnswer))}</p>
-      <p><b>Part 2:</b> ${escapeHtml(stripTags(mediumPart))} | <b>Answer:</b> ${escapeHtml(stripTags(mediumAnswer))}</p>
-      <p><b>Part 3:</b> ${escapeHtml(stripTags(hardPart))} | <b>Answer:</b> ${escapeHtml(stripTags(hardAnswer))}</p>
+      <p><b>Leadin:</b></p>
+      <div class="rich-text">${sanitizeRichHtml(bonus.leadin || "")}</div>
+      <p><b>Part 1:</b></p>
+      <div class="rich-text">${sanitizeRichHtml(easyPart)}</div>
+      <p><b>Answer 1:</b></p>
+      <div class="rich-text">${sanitizeRichHtml(easyAnswer)}</div>
+      <p><b>Part 2:</b></p>
+      <div class="rich-text">${sanitizeRichHtml(mediumPart)}</div>
+      <p><b>Answer 2:</b></p>
+      <div class="rich-text">${sanitizeRichHtml(mediumAnswer)}</div>
+      <p><b>Part 3:</b></p>
+      <div class="rich-text">${sanitizeRichHtml(hardPart)}</div>
+      <p><b>Answer 3:</b></p>
+      <div class="rich-text">${sanitizeRichHtml(hardAnswer)}</div>
     </section>
 
     <section class="route-block">
